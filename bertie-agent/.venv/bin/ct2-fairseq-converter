@@ -1,0 +1,8 @@
+#!/bin/sh
+'''exec' "/Users/erichard26/Bertie 2.0/bertie-agent/.venv/bin/python3" "$0" "$@"
+' '''
+import sys
+from ctranslate2.converters.fairseq import main
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(main())

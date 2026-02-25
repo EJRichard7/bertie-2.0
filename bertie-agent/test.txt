@@ -1,0 +1,13 @@
+Bertie Test Document.
+
+This is paragraph one. It has multiple sentences. Some are short. Some are longer, with commas, so the voice has to keep a rhythm.
+
+Here is a second paragraph about school. Sometimes I want to highlight a date. Sometimes I want to mark a definition. Sometimes I want to add a note that says this is important.
+
+Now we add a list of facts. The capital of California is Sacramento. The Golden Gate Bridge is in San Francisco. The Pacific Ocean is west of California.
+
+Here is a quote practice line. “This is a quote that I might want to highlight,” she said.
+
+Now we test commands. Highlight that sentence. Note: this is a key point. Star this idea.
+
+Final paragraph. Reading longer documents is easier when Bertie keeps going. I want to stop, resume, and highlight without touching the keyboard.
