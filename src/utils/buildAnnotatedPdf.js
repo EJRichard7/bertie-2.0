@@ -57,7 +57,6 @@ function rectFromShape(r) {
 function normalizeHighlight(h) {
   if (!h) return null;
 
-  // do not export temporary live-reader highlight
   if (h.kind === "live-reader" || h.id === "__live_reader__") {
     return null;
   }
@@ -83,7 +82,6 @@ function normalizeHighlight(h) {
     };
   }
 
-  // prefer scaledPosition because it is the most stable for export
   if (h.scaledPosition?.pageNumber) {
     const pos = h.scaledPosition;
 
@@ -152,7 +150,6 @@ export async function buildAnnotatedPdf(pdfBytes, highlights = []) {
     const h = normalizeHighlight(raw);
     if (!h) continue;
 
-    // react-pdf-highlighter page numbers are 1-based
     const pageIndex = h.pageNumber - 1;
 
     if (pageIndex < 0 || pageIndex >= pageCount) continue;
