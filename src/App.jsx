@@ -1,3 +1,5 @@
+import { buildAnnotatedPdf } from "./utils/buildAnnotatedPdf";
+import { downloadPdfBytes, printPdfBytes } from "./utils/pdfExportPrint";
 import React, { useEffect, useRef, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 
@@ -37,6 +39,10 @@ function getSelectedText() {
   return window.getSelection()?.toString()?.trim() || "";
 }
 
+function normalize(text) {
+  return (text || "").toLowerCase().trim();
+}
+
 function splitIntoSentences(text) {
   const clean = (text || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
   if (!clean) return [];
@@ -55,6 +61,7 @@ function splitIntoSentences(text) {
     }
     return chunked;
   }
+
   return parts;
 }
 
@@ -74,12 +81,14 @@ async function extractPdfSentences(fileUrl) {
       all.push({ page: p, text: s });
     }
   }
+
   return { numPages: pdf.numPages, sentences: all };
 }
 
 // Date patterns
 const MONTH =
   "(Jan(uary)?|Feb(ruary)?|Mar(ch)?|Apr(il)?|May|Jun(e)?|Jul(y)?|Aug(ust)?|Sep(tember)?|Oct(ober)?|Nov(ember)?|Dec(ember)?)";
+
 const DATE_REGEXES = [
   new RegExp(`\\b${MONTH}\\s+\\d{1,2}(,\\s*\\d{4})?\\b`, "i"),
   /\b\d{1,2}\/\d{1,2}(\/\d{2,4})?\b/,
@@ -111,19 +120,72 @@ export default function App() {
   const [docMode, setDocMode] = useState(false);
   const stopDocRef = useRef(false);
 
-  // Auto highlight current reading sentence
+  // Live follow-along mode
+  const [followAlong, setFollowAlong] = useState(true);
+
+  // Auto-highlight current reading sentence
   const [autoHighlightText, setAutoHighlightText] = useState("");
   const [autoHighlightNonce, setAutoHighlightNonce] = useState(0);
   const [autoHighlightPage, setAutoHighlightPage] = useState(1);
 
+  // NEW: when the sentence is found automatically,
+  // trigger a real saved highlight right after
+  const [saveAfterAutoFind, setSaveAfterAutoFind] = useState(false);
+
   const [pendingAutoNote, setPendingAutoNote] = useState("");
+
+  window.__bertie = window.__bertie || {};
+  window.__bertie.highlights = highlights;
+  window.__bertie.pdfFile = pdfFile;
+
+  async function onExportAndPrint() {
+    try {
+      if (!pdfFile) {
+        setStatusMsg("Upload a PDF first.");
+        return;
+      }
+
+      let originalBytes;
+
+      if (pdfFile instanceof File) {
+        originalBytes = await pdfFile.arrayBuffer();
+      } else {
+        const response = await fetch(pdfFile);
+        originalBytes = await response.arrayBuffer();
+      }
+
+      const annotatedBytes = await buildAnnotatedPdf(originalBytes, highlights);
+
+      downloadPdfBytes(annotatedBytes, "bertie-annotated.pdf");
+      printPdfBytes(annotatedBytes);
+
+      setStatusMsg("Exported + opened print dialog.");
+    } catch (err) {
+      console.error(err);
+      setStatusMsg(`Export/print failed: ${err?.message || err}`);
+    }
+  }
 
   async function onUploadPdf(e) {
     const file = e.target.files?.[0];
     if (!file) return;
 
     const url = URL.createObjectURL(file);
+
     setPdfFile(url);
+    setHighlights([]);
+    setSelectedHighlightId(null);
+
+    setDocSentences([]);
+    setDocIdx(0);
+    setDocMode(false);
+    stopDocRef.current = true;
+
+    setAutoHighlightText("");
+    setAutoHighlightNonce(0);
+    setAutoHighlightPage(1);
+    setSaveAfterAutoFind(false);
+
     setStatusMsg(`Loaded: ${file.name} — building sentence list…`);
 
     setDocLoading(true);
@@ -157,14 +219,33 @@ export default function App() {
   useEffect(() => {
     if (!pendingAutoNote) return;
     if (!selectedHighlightId) return;
+
     updateHighlightNote(selectedHighlightId, pendingAutoNote);
     setPendingAutoNote("");
   }, [pendingAutoNote, selectedHighlightId]);
+
+  function syncFollowAlongHighlight(index) {
+    if (!followAlong) return;
+    if (!docSentences.length) return;
+
+    const sObj = docSentences[index];
+    if (!sObj?.text) return;
+
+    setAutoHighlightText(sObj.text);
+    setAutoHighlightPage(sObj.page);
+    setAutoHighlightNonce((n) => n + 1);
+  }
+
+  function clearFollowAlongHighlight() {
+    setAutoHighlightText("");
+    setSaveAfterAutoFind(false);
+  }
 
   function stopAllReading() {
     stopDocRef.current = true;
     setDocMode(false);
     stopSpeaking();
+    clearFollowAlongHighlight();
     setStatusMsg("Stopped reading.");
   }
 
@@ -174,8 +255,11 @@ export default function App() {
       setStatusMsg("Select text first.");
       return;
     }
+
     stopDocRef.current = true;
     setDocMode(false);
+    clearFollowAlongHighlight();
+
     speakText(text);
     setStatusMsg("Reading selected text…");
   }
@@ -194,14 +278,17 @@ export default function App() {
 
     const loop = () => {
       if (stopDocRef.current) return;
+
       if (i >= docSentences.length) {
         setDocMode(false);
+        clearFollowAlongHighlight();
         setStatusMsg("Finished the document ✅");
         return;
       }
 
       const s = docSentences[i];
       setDocIdx(i);
+      syncFollowAlongHighlight(i);
       setStatusMsg(`Reading ${i + 1}/${docSentences.length} (p.${s.page})`);
 
       speakText(s.text, () => {
@@ -215,18 +302,34 @@ export default function App() {
 
   function nextSentence() {
     if (!docSentences.length) return;
+
     const n = Math.min(docIdx + 1, docSentences.length - 1);
     setDocIdx(n);
-    if (docMode) readDocument(n);
-    else setStatusMsg(`Moved to sentence ${n + 1}. Say “read document” to continue.`);
+    syncFollowAlongHighlight(n);
+
+    if (docMode) {
+      stopDocRef.current = true;
+      stopSpeaking();
+      readDocument(n);
+    } else {
+      setStatusMsg(`Moved to sentence ${n + 1}. Say “read document” to continue.`);
+    }
   }
 
   function prevSentence() {
     if (!docSentences.length) return;
+
     const n = Math.max(docIdx - 1, 0);
     setDocIdx(n);
-    if (docMode) readDocument(n);
-    else setStatusMsg(`Moved to sentence ${n + 1}. Say “read document” to continue.`);
+    syncFollowAlongHighlight(n);
+
+    if (docMode) {
+      stopDocRef.current = true;
+      stopSpeaking();
+      readDocument(n);
+    } else {
+      setStatusMsg(`Moved to sentence ${n + 1}. Say “read document” to continue.`);
+    }
   }
 
   function highlightCurrentSelection() {
@@ -234,6 +337,7 @@ export default function App() {
       setStatusMsg('Select text first, then say: "Bertie highlight that".');
       return;
     }
+
     setVoiceIntent("highlight");
     setStatusMsg("Highlighting selection…");
   }
@@ -243,11 +347,13 @@ export default function App() {
       setStatusMsg("Click/drag to select any part of a sentence first.");
       return;
     }
+
     const ok = expandSelection("sentence");
     if (!ok) {
       setStatusMsg("Couldn’t expand to sentence. Try selecting it manually.");
       return;
     }
+
     setStatusMsg("Expanded to sentence. Highlighting…");
     setVoiceIntent("highlight");
   }
@@ -257,11 +363,13 @@ export default function App() {
       setStatusMsg("Select any part of a paragraph first.");
       return;
     }
+
     const ok = expandSelection("paragraph");
     if (!ok) {
       setStatusMsg("Couldn’t expand to paragraph. Try selecting it manually.");
       return;
     }
+
     setStatusMsg("Expanded to paragraph. Highlighting…");
     setVoiceIntent("highlight");
   }
@@ -271,6 +379,7 @@ export default function App() {
       setStatusMsg("Select near the date first (any part of the sentence).");
       return;
     }
+
     const ok = expandSelection("sentence");
     if (!ok) {
       setStatusMsg("Couldn’t expand to the date’s sentence. Try selecting it manually.");
@@ -281,6 +390,7 @@ export default function App() {
     const found = findDateIn(sentenceText);
 
     setVoiceIntent("highlight");
+
     if (found) {
       setStatusMsg(`Date found: ${found}. Highlighting sentence + saving note…`);
       setPendingAutoNote(`DATE: ${found}`);
@@ -289,19 +399,20 @@ export default function App() {
     }
   }
 
-  // ✅ Highlight the sentence Bertie is currently reading
   function highlightCurrentReadingSentence() {
     if (!docSentences.length) {
       setStatusMsg("Upload a PDF first.");
       return;
     }
+
     const sObj = docSentences[docIdx];
     if (!sObj?.text) {
       setStatusMsg("No current sentence to highlight.");
       return;
     }
 
-    setStatusMsg(`Highlighting current sentence (p.${sObj.page})…`);
+    setStatusMsg(`Finding current sentence (p.${sObj.page})…`);
+    setSaveAfterAutoFind(true);
     setAutoHighlightText(sObj.text);
     setAutoHighlightPage(sObj.page);
     setAutoHighlightNonce((n) => n + 1);
@@ -322,7 +433,6 @@ export default function App() {
     }
 
     if (cmd.type === "highlight") {
-      // If user said "highlight" while doc is reading, do the smart highlight:
       if (docMode || (cmd.text && normalize(cmd.text).includes("sentence"))) {
         highlightCurrentReadingSentence();
       } else {
@@ -337,31 +447,36 @@ export default function App() {
         setStatusMsg('Try: "Bertie note this is important".');
         return;
       }
+
       const targetId = selectedHighlightId || highlights?.[0]?.id;
       if (!targetId) {
         setStatusMsg("No highlight to attach a note to yet.");
         return;
       }
+
       updateHighlightNote(targetId, note);
       setStatusMsg(`Saved note: "${note}"`);
       return;
     }
 
     if (cmd.type === "unknown") {
-      const t = (cmd.text || "").toLowerCase();
+      const t = normalize(cmd.text);
 
       if (t.includes("read") && (t.includes("document") || t.includes("whole"))) {
         readDocument(docIdx);
         return;
       }
+
       if (t.includes("start over") || t.includes("from the beginning")) {
         readDocument(0);
         return;
       }
+
       if (t.includes("next sentence") || t === "next") {
         nextSentence();
         return;
       }
+
       if (t.includes("previous sentence") || t.includes("go back") || t === "back") {
         prevSentence();
         return;
@@ -386,11 +501,75 @@ export default function App() {
     }
   }
 
+  const currentSentence = docSentences[docIdx];
+
   return (
     <div style={{ padding: 20 }}>
-      <h2>PDF Voice Annotator — Bertie 2.0 (Always-On Mic + Highlight Current Sentence)</h2>
+      <h2>PDF Voice Annotator — Bertie 2.0 (Follow Along Reader)</h2>
+
+      <div
+        style={{
+          marginTop: 12,
+          marginBottom: 16,
+          padding: 14,
+          border: "1px solid #d8d8d8",
+          borderRadius: 10,
+          background: "#f8f9fb",
+          maxWidth: 900,
+          lineHeight: 1.5,
+        }}
+      >
+        <div style={{ fontWeight: 700, marginBottom: 8 }}>How to Use Bertie</div>
+
+        <div style={{ fontSize: 14, marginBottom: 8 }}>
+          Bertie lets you read a PDF out loud, move sentence by sentence, and create highlights with your mouse or voice.
+        </div>
+
+        <div style={{ fontSize: 14, marginBottom: 6 }}>
+          <b>1. Upload a PDF</b> using the file picker.
+        </div>
+
+        <div style={{ fontSize: 14, marginBottom: 6 }}>
+          <b>2. Read text</b> by selecting part of the PDF and clicking <b>Read selected</b>, or click <b>Read document</b> to have Bertie read the whole document sentence by sentence.
+        </div>
+
+        <div style={{ fontSize: 14, marginBottom: 6 }}>
+          <b>3. Move through the document</b> with <b>Prev sentence</b> and <b>Next sentence</b>.
+        </div>
+
+        <div style={{ fontSize: 14, marginBottom: 6 }}>
+          <b>4. Highlight text</b> by selecting text and clicking <b>Highlight selection</b>, or use the sentence / paragraph / date highlight buttons.
+        </div>
+
+        <div style={{ fontSize: 14, marginBottom: 6 }}>
+          <b>5. Use voice commands</b> by saying <b>"Bertie"</b> and then a command.
+        </div>
+
+        <div style={{ fontSize: 14, marginBottom: 6 }}>
+          Example commands:
+          <div style={{ marginTop: 6, paddingLeft: 16 }}>
+            <div>• "Bertie read document"</div>
+            <div>• "Bertie stop"</div>
+            <div>• "Bertie next sentence"</div>
+            <div>• "Bertie go back"</div>
+            <div>• "Bertie highlight sentence"</div>
+            <div>• "Bertie note this is important"</div>
+          </div>
+        </div>
+
+        <div style={{ fontSize: 14 }}>
+          <b>Follow Along</b> keeps the current sentence highlighted while Bertie reads.
+        </div>
+      </div>
 
       <input type="file" accept="application/pdf" onChange={onUploadPdf} />
+
+      <button
+        onClick={onExportAndPrint}
+        style={{ marginLeft: 12, padding: "6px 12px" }}
+      >
+        Export + Print PDF
+      </button>
 
       <div
         style={{
@@ -412,16 +591,31 @@ export default function App() {
 
         <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button onClick={readSelected}>Read selected</button>
-          <button disabled={docLoading || !docSentences.length} onClick={() => readDocument(docIdx)}>
+
+          <button
+            disabled={docLoading || !docSentences.length}
+            onClick={() => readDocument(docIdx)}
+          >
             Read document
           </button>
+
           <button onClick={stopAllReading}>Stop</button>
+
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <input
+              type="checkbox"
+              checked={followAlong}
+              onChange={(e) => setFollowAlong(e.target.checked)}
+            />
+            Follow Along
+          </label>
 
           <span style={{ width: 12 }} />
 
           <button disabled={!docSentences.length} onClick={prevSentence}>
             Prev sentence
           </button>
+
           <button disabled={!docSentences.length} onClick={nextSentence}>
             Next sentence
           </button>
@@ -446,9 +640,27 @@ export default function App() {
 
         <div style={{ marginTop: 6 }}>
           {statusMsg}
+
           {docSentences.length ? (
             <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
-              Sentence: {docIdx + 1}/{docSentences.length} (p.{docSentences[docIdx]?.page})
+              Sentence: {docIdx + 1}/{docSentences.length} (p.{currentSentence?.page})
+            </div>
+          ) : null}
+
+          {docSentences.length ? (
+            <div
+              style={{
+                marginTop: 8,
+                padding: 8,
+                border: "1px solid #eee",
+                borderRadius: 8,
+                background: "#fafafa",
+                fontSize: 13,
+                lineHeight: 1.45,
+              }}
+            >
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>Current sentence</div>
+              <div>{currentSentence?.text || "—"}</div>
             </div>
           ) : null}
         </div>
@@ -469,9 +681,17 @@ export default function App() {
           autoHighlightPage={autoHighlightPage}
           onAutoHighlightConsumed={(ok) => {
             if (!ok) {
+              setSaveAfterAutoFind(false);
               setStatusMsg(
                 "Couldn’t find that sentence in the PDF text layer (maybe not rendered yet, or PDF text is weird). Try again or use manual highlight."
               );
+              return;
+            }
+
+            if (saveAfterAutoFind) {
+              setVoiceIntent("highlight");
+              setSaveAfterAutoFind(false);
+              setStatusMsg("Sentence found. Highlighting…");
             }
           }}
         />
